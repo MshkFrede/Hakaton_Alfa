@@ -214,5 +214,10 @@ func TestAccessControl(t *testing.T) {
 	anon.do("GET", "/api/v1/applications", nil, 401, nil)
 	// неполная заявка не отправляется
 	a.do("POST", "/api/v1/applications/"+v.Application.ID+"/submit", nil, 422, nil)
+	// иностранный номер не принимается
+	a.do("PATCH", "/api/v1/applications/"+v.Application.ID, map[string]any{"version": v.Application.Version, "product_code": "EXPRESS",
+		"purpose": "CASH_GAP", "amount": 1_000_000, "term_months": 12, "annual_revenue": 10_000_000,
+		"contact_phone": "+1 202 555-01-23", "bki_consent": true}, 200, &v)
+	a.do("POST", "/api/v1/applications/"+v.Application.ID+"/submit", nil, 422, nil)
 	_ = fmt.Sprint()
 }
