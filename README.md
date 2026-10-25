@@ -27,6 +27,14 @@ docker compose up --build
 | Моки внешних источников | http://localhost:8090 |
 | PostgreSQL (с хоста) | `localhost:5433`, БД/пользователь/пароль `credit` |
 
+**Если порт занят** (ошибка `Bind for 0.0.0.0:8080 failed: port is already allocated`) — задайте другой порт:
+
+```bash
+cp .env.example .env        # Windows PowerShell: copy .env.example .env
+# в .env поменяйте API_PORT=8080 на свободный, например API_PORT=8088
+docker compose up --build
+```
+
 Остановить: `Ctrl+C`, затем `docker compose down`. Сбросить данные к исходным демо: `docker compose down -v`.
 
 ## Демо-учётки
