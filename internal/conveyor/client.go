@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/google/uuid"
 
@@ -85,14 +84,10 @@ func ValidateForSubmit(a domain.Application) *ValidationError {
 	if a.AnnualRevenue <= 0 {
 		f["annual_revenue"] = "Укажите выручку за последний год"
 	}
-	digits := 0
-	for _, r := range a.ContactPhone {
-		if unicode.IsDigit(r) {
-			digits++
-		}
-	}
-	if digits < 10 || digits > 15 {
+	if strings.TrimSpace(a.ContactPhone) == "" {
 		f["contact_phone"] = "Укажите телефон для связи"
+	} else if !domain.ValidRuPhone(a.ContactPhone) {
+		f["contact_phone"] = "Проверьте номер телефона"
 	}
 	if a.HasCollateral && strings.TrimSpace(a.CollateralDescription) == "" {
 		f["collateral_description"] = "Опишите обеспечение"

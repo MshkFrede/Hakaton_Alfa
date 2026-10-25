@@ -84,3 +84,17 @@ func TestRecommend(t *testing.T) {
 		t.Errorf("cash gap → %s", r[0].Product.Code)
 	}
 }
+
+func TestValidRuPhone(t *testing.T) {
+	for _, p := range []string{"+7 999 123-45-67", "+79991234567", "89991234567", "8 (495) 123-45-67", "+7 (812) 000-00-00"} {
+		if !ValidRuPhone(p) {
+			t.Errorf("%q must be valid", p)
+		}
+	}
+	for _, p := range []string{"1234567890", "79991234567", "+8 999 123-45-67", "+1 202 555-01-23", "+7 999 123-45-6", "+7 999 123-45-678",
+		"89991234567x", "+7 199 123-45-67", "8+9991234567", "+380 99 123 4567", ""} {
+		if ValidRuPhone(p) {
+			t.Errorf("%q must be invalid", p)
+		}
+	}
+}

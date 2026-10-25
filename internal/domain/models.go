@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -179,4 +180,32 @@ func ValidINN(inn string) bool {
 			check([]int{3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8}) == d[11]
 	}
 	return false
+}
+
+// ValidRuPhone проверяет российский номер: +7 или 8, затем 10 цифр, код начинается с 3, 4, 8 или 9.
+// Допускаются пробелы, дефисы и скобки как разделители.
+func ValidRuPhone(s string) bool {
+	s = strings.TrimSpace(s)
+	var digits []byte
+	for i, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			digits = append(digits, byte(r))
+		case r == '+' && i == 0:
+		case r == ' ' || r == '-' || r == '(' || r == ')':
+		default:
+			return false
+		}
+	}
+	plus := strings.HasPrefix(s, "+")
+	if len(digits) != 11 {
+		return false
+	}
+	switch {
+	case plus && digits[0] == '7':
+	case !plus && digits[0] == '8':
+	default:
+		return false
+	}
+	return strings.ContainsRune("3489", rune(digits[1]))
 }
