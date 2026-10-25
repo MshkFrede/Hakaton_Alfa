@@ -1,1 +1,663 @@
 openapi: 3.0.3
+info:
+  title: Умный кредитный кабинет предпринимателя — API
+  version: 1.0.0
+  description: |
+    REST API кредитного конвейера для малого и микробизнеса.
+
+    **Роли:** `CLIENT` — представитель компании; `UNDERWRITER` — кредитный специалист банка.
+    Авторизация — JWT (Bearer), токен выдаёт `POST /auth/login`.
+
+    **Жизненный цикл заявки** описан машиной состояний (`GET /catalog/statuses` возвращает таблицу переходов).
+    Автоматические шаги (обогащение, скоринг, выдача) выполняет фоновый обработчик — статус заявки
+    меняется без участия клиента, интерфейс опрашивает `GET /applications/{id}`.
+
+    **Ошибки** — единый формат `Error`. Коды: 400 некорректный JSON, 401 нет/просрочен токен,
+    403 недоступно для роли, 404 не найдено (в т.ч. чужая заявка), 409 недопустимо в текущем
+    статусе или конфликт версий, 422 ошибки валидации по полям, 429 частые попытки входа.
+
+    Демо-учётки: см. README (пароль `demo1234`).
+servers:
+  - url: http://localhost:8080/api/v1
+security:
+  - bearer: []
+tags:
+  - name: auth
+  - name: catalog
+    description: Справочники, подбор продукта, калькулятор (без авторизации)
+  - name: client
+    description: Действия клиента
+  - name: underwriter
+    description: Действия кредитного специалиста
+  - name: applications
+    description: Общие методы чтения заявок (ответ зависит от роли)
+
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Вход
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, example: anna@romashka.demo }
+                password: { type: string, example: demo1234 }
+      responses:
+        "200":
+          description: Токен
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token: { type: string }
+                  token_type: { type: string, example: Bearer }
+                  expires_at: { type: string, format: date-time }
+                  user: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+
+  /me:
+    get:
+      tags: [auth]
+      summary: Текущий пользователь и его компания
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+                  company: { $ref: "#/components/schemas/Company" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /me/company:
+    post:
+      tags: [client]
+      summary: Привязать компанию по ИНН (онбординг)
+      description: Данные компании берутся из ЕГРЮЛ/ЕГРИП, клиент вводит только ИНН.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [inn]
+              properties:
+                inn: { type: string, example: "7713056785" }
+      responses:
+        "200": { description: Компания, content: { application/json: { schema: { $ref: "#/components/schemas/Company" } } } }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /companies/lookup:
+    get:
+      tags: [client]
+      summary: Найти компанию в ЕГРЮЛ/ЕГРИП по ИНН (автозаполнение)
+      parameters:
+        - { name: inn, in: query, required: true, schema: { type: string }, example: "7713056785" }
+      responses:
+        "200": { description: Выписка, content: { application/json: { schema: { $ref: "#/components/schemas/EGRULCompany" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /catalog/products:
+    get:
+      tags: [catalog]
+      summary: Каталог кредитных продуктов
+      security: []
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Product" } } } } }
+
+  /catalog/purposes:
+    get:
+      tags: [catalog]
+      summary: Задачи бизнеса (с чего клиент начинает выбор)
+      security: []
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Purpose" } } } } }
+
+  /catalog/recommendations:
+    get:
+      tags: [catalog]
+      summary: Подбор продуктов под задачу и сумму
+      security: []
+      parameters:
+        - { name: purpose, in: query, required: true, schema: { type: string }, example: CASH_GAP }
+        - { name: amount, in: query, schema: { type: integer }, example: 3000000 }
+      responses:
+        "200":
+          description: Продукты по убыванию релевантности
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    product: { $ref: "#/components/schemas/Product" }
+                    recommended: { type: boolean }
+                    fits: { type: boolean, description: Подходит ли по сумме }
+                    reason: { type: string }
+
+  /catalog/calculate:
+    post:
+      tags: [catalog]
+      summary: Предварительный расчёт платежа и нагрузки (до подачи)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [product_code, amount, term_months]
+              properties:
+                product_code: { type: string, example: EXPRESS }
+                amount: { type: integer, example: 3000000 }
+                term_months: { type: integer, example: 24 }
+                annual_revenue: { type: integer, example: 60000000 }
+                existing_monthly_payments: { type: integer, example: 95000 }
+      responses:
+        "200":
+          description: Расчёт
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rate_from: { type: number }
+                  rate_to: { type: number }
+                  payment_from: { type: integer }
+                  payment_to: { type: integer }
+                  overpayment: { type: integer }
+                  within_limits: { type: boolean }
+                  debt_to_revenue: { type: number, description: Доля платежей в месячной выручке }
+                  load_level: { type: string, enum: [comfortable, elevated, high] }
+                  hint: { type: string }
+                  max_amount_estimate: { type: integer }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /catalog/statuses:
+    get:
+      tags: [catalog]
+      summary: Статусы и таблица переходов машины состояний
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  statuses:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        code: { $ref: "#/components/schemas/Status" }
+                        title: { type: string }
+                        final: { type: boolean }
+                  transitions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        from: { $ref: "#/components/schemas/Status" }
+                        to: { $ref: "#/components/schemas/Status" }
+                        actors: { type: array, items: { type: string, enum: [CLIENT, UNDERWRITER, SYSTEM] } }
+
+  /catalog/document-types:
+    get:
+      tags: [catalog]
+      summary: Типы документов, которые может запросить банк
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object, properties: { code: { type: string }, title: { type: string } } }
+
+  /applications:
+    get:
+      tags: [applications]
+      summary: Список заявок
+      description: Клиент видит заявки своей компании, специалист — все. Фильтр по статусу — только для специалиста.
+      parameters:
+        - { name: status, in: query, schema: { type: string }, description: "Через запятую: MANUAL_REVIEW,DOCS_REQUESTED" }
+        - { name: q, in: query, schema: { type: string }, description: Поиск по названию, ИНН, номеру }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Application" } } } } }
+    post:
+      tags: [client]
+      summary: Создать черновик заявки
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DraftInput" }
+      responses:
+        "201": { $ref: "#/components/responses/View" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /applications/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [applications]
+      summary: Заявка с историей, документами (для банка — с досье)
+      responses:
+        "200": { $ref: "#/components/responses/View" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [client]
+      summary: Изменить черновик (оптимистичная блокировка по version)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/DraftInput"
+                - type: object
+                  required: [version]
+                  properties: { version: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/View" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /applications/{id}/submit:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [client]
+      summary: Отправить заявку в банк
+      description: Полная проверка полноты данных. Идемпотентно — повторный вызов не создаёт дублей обработки.
+      responses:
+        "200": { $ref: "#/components/responses/View" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /applications/{id}/cancel:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [client]
+      summary: Отозвать заявку (черновик или ожидание документов)
+      responses:
+        "200": { $ref: "#/components/responses/View" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /applications/{id}/offer/accept:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [client]
+      summary: Принять одобрение или контрпредложение → подписание
+      responses:
+        "200": { $ref: "#/components/responses/View" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /applications/{id}/offer/decline:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [client]
+      summary: Отказаться от предложения банка
+      responses:
+        "200": { $ref: "#/components/responses/View" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /applications/{id}/sign:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [client]
+      summary: Подписать договор кодом (симуляция ПЭП)
+      description: Код возвращается в `sign_code_demo` ответа на `offer/accept` (вместо SMS — в прототипе все шаги внутри продукта).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [code], properties: { code: { type: string, example: "123456" } } }
+      responses:
+        "200": { $ref: "#/components/responses/View" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /applications/{id}/documents:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [client]
+      summary: Загрузить документ по запросу банка
+      description: Когда закрыты все запросы, заявка автоматически возвращается на ручной разбор.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [request_id, file]
+              properties:
+                request_id: { type: string, format: uuid }
+                file: { type: string, format: binary }
+      responses:
+        "200": { $ref: "#/components/responses/View" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /applications/{id}/documents/{docId}:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - { name: docId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [applications]
+      summary: Скачать документ
+      responses:
+        "200": { description: Файл, content: { application/octet-stream: { schema: { type: string, format: binary } } } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /applications/{id}/events:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [applications]
+      summary: Журнал событий (клиенту — без внутренних записей банка)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Event" } } } } }
+
+  /applications/{id}/assign:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [underwriter]
+      summary: Взять заявку в работу
+      responses:
+        "200": { $ref: "#/components/responses/View" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /applications/{id}/decision:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [underwriter]
+      summary: Решение по заявке на ручном разборе
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DecisionInput" }
+            examples:
+              approve: { value: { action: APPROVE, version: 7, amount: 1500000, term_months: 24, rate: 26, comment: "Просрочки погашены, нагрузка в норме" } }
+              counter: { value: { action: COUNTER_OFFER, amount: 1200000, term_months: 24, rate: 26, comment: "Снижаем сумму" } }
+              docs: { value: { action: REQUEST_DOCS, documents: [{ doc_type: BANK_STATEMENT }], comment: "Проверить обороты" } }
+              reject: { value: { action: REJECT, comment: "Недостоверные сведения о выручке" } }
+      responses:
+        "200": { $ref: "#/components/responses/View" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /stats:
+    get:
+      tags: [underwriter]
+      summary: Показатели конвейера
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  by_status: { type: object, additionalProperties: { type: integer } }
+                  total: { type: integer }
+                  decisions: { type: integer }
+                  auto_decisions: { type: integer }
+                  avg_decision_seconds: { type: number }
+
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer, bearerFormat: JWT }
+  parameters:
+    id: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+  responses:
+    Error:
+      description: Ошибка
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    View:
+      description: Заявка
+      content: { application/json: { schema: { $ref: "#/components/schemas/ApplicationView" } } }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string, example: VALIDATION_ERROR }
+            message: { type: string }
+            fields: { type: object, additionalProperties: { type: string } }
+            request_id: { type: string }
+    Status:
+      type: string
+      enum: [DRAFT, SUBMITTED, ENRICHMENT, SCORING, MANUAL_REVIEW, DOCS_REQUESTED, APPROVED, COUNTER_OFFER, SIGNING, SIGNED, ISSUED, REJECTED, DECLINED_BY_CLIENT, CANCELLED]
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        full_name: { type: string }
+        position: { type: string }
+        role: { type: string, enum: [CLIENT, UNDERWRITER] }
+        company_id: { type: string, format: uuid, nullable: true }
+    Company:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        inn: { type: string }
+        ogrn: { type: string }
+        name: { type: string }
+        full_name: { type: string }
+        legal_form: { type: string }
+        status: { type: string }
+        registration_date: { type: string, format: date-time }
+        director_name: { type: string }
+        okved_code: { type: string }
+        okved_name: { type: string }
+        address: { type: string }
+    EGRULCompany:
+      type: object
+      description: Выписка ЕГРЮЛ/ЕГРИП (упрощённый контракт мока)
+      properties:
+        inn: { type: string }
+        ogrn: { type: string }
+        name: { type: string }
+        full_name: { type: string }
+        legal_form: { type: string }
+        status: { type: string, enum: [ACTIVE, LIQUIDATING, LIQUIDATED, BANKRUPTCY] }
+        registration_date: { type: string, format: date }
+        director: { type: object, properties: { name: { type: string }, position: { type: string } } }
+        founders: { type: array, items: { type: object, properties: { name: { type: string }, share: { type: number } } } }
+        okved: { type: object, properties: { code: { type: string }, name: { type: string } } }
+        address: { type: string }
+    Product:
+      type: object
+      properties:
+        code: { type: string, enum: [EXPRESS, WORKING_CAPITAL, INVESTMENT] }
+        name: { type: string }
+        tagline: { type: string }
+        description: { type: string }
+        min_amount: { type: integer }
+        max_amount: { type: integer }
+        min_term_months: { type: integer }
+        max_term_months: { type: integer }
+        base_rate: { type: number }
+        auto_approve_limit: { type: integer, description: "0 — всегда ручное рассмотрение" }
+        collateral_note: { type: string }
+        features: { type: array, items: { type: string } }
+    Purpose:
+      type: object
+      properties:
+        code: { type: string, enum: [EQUIPMENT, WORKING_CAPITAL, CASH_GAP, SEASONAL, NEW_DIRECTION, OTHER] }
+        title: { type: string }
+        hint: { type: string }
+        products: { type: array, items: { type: string } }
+        explanation: { type: string }
+    DraftInput:
+      type: object
+      required: [product_code, purpose]
+      properties:
+        product_code: { type: string, example: EXPRESS }
+        purpose: { type: string, example: CASH_GAP }
+        purpose_comment: { type: string }
+        amount: { type: integer, example: 3000000, description: Рубли }
+        term_months: { type: integer, example: 24 }
+        annual_revenue: { type: integer, example: 60000000 }
+        existing_monthly_payments: { type: integer, example: 0 }
+        has_collateral: { type: boolean }
+        collateral_description: { type: string }
+        contact_phone: { type: string, example: "+7 999 123-45-67" }
+        bki_consent: { type: boolean, example: true }
+    Offer:
+      type: object
+      properties:
+        amount: { type: integer }
+        term_months: { type: integer }
+        rate: { type: number }
+        monthly_payment: { type: integer }
+        changed: { type: boolean }
+    Application:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: string, example: КЗ-001001 }
+        company_id: { type: string, format: uuid }
+        product_code: { type: string }
+        product_name: { type: string }
+        purpose: { type: string }
+        amount: { type: integer }
+        term_months: { type: integer }
+        annual_revenue: { type: integer }
+        existing_monthly_payments: { type: integer }
+        has_collateral: { type: boolean }
+        status: { $ref: "#/components/schemas/Status" }
+        status_title: { type: string }
+        status_changed_at: { type: string, format: date-time }
+        version: { type: integer, description: Для оптимистичной блокировки }
+        offer: { $ref: "#/components/schemas/Offer" }
+        client_message: { type: string }
+        decision_reason: { type: string, description: Только для банка }
+        score: { type: integer, nullable: true, description: Только для банка }
+        grade: { type: string, description: Только для банка }
+        assigned_underwriter_name: { type: string }
+        company_name: { type: string }
+        company_inn: { type: string }
+        submitted_at: { type: string, format: date-time }
+        signed_at: { type: string, format: date-time }
+        issued_at: { type: string, format: date-time }
+        account_number: { type: string }
+    Event:
+      type: object
+      properties:
+        id: { type: integer }
+        from_status: { $ref: "#/components/schemas/Status" }
+        to_status: { $ref: "#/components/schemas/Status" }
+        type: { type: string, example: STATUS_CHANGED }
+        actor_type: { type: string, enum: [CLIENT, UNDERWRITER, SYSTEM] }
+        actor_name: { type: string }
+        message: { type: string }
+        internal_comment: { type: string, description: Только для банка }
+        visibility: { type: string, enum: [ALL, BANK] }
+        created_at: { type: string, format: date-time }
+    DocumentRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        doc_type: { type: string }
+        title: { type: string }
+        comment: { type: string }
+        status: { type: string, enum: [REQUESTED, UPLOADED] }
+        documents:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              file_name: { type: string }
+              content_type: { type: string }
+              size: { type: integer }
+    ScoringFactor:
+      type: object
+      properties:
+        code: { type: string }
+        name: { type: string }
+        value: { type: string }
+        points: { type: integer }
+        client_hint: { type: string }
+    ApplicationView:
+      type: object
+      properties:
+        application: { $ref: "#/components/schemas/Application" }
+        product: { $ref: "#/components/schemas/Product" }
+        company: { $ref: "#/components/schemas/Company" }
+        events: { type: array, items: { $ref: "#/components/schemas/Event" } }
+        document_requests: { type: array, items: { $ref: "#/components/schemas/DocumentRequest" } }
+        missing_fields: { type: object, additionalProperties: { type: string }, description: "Для черновика: чего не хватает для отправки" }
+        sign_code_demo: { type: string, description: "Только в статусе SIGNING: код подписи (симуляция)" }
+        dossier:
+          type: object
+          description: Только для банка
+          properties:
+            enrichment:
+              type: array
+              items:
+                type: object
+                properties:
+                  source: { type: string, enum: [EGRUL, BKI, FNS] }
+                  status: { type: string, enum: [OK, ERROR] }
+                  data: { type: object }
+                  error: { type: string }
+                  duration_ms: { type: integer }
+                  attempts: { type: integer }
+            scoring:
+              type: object
+              nullable: true
+              properties:
+                model_version: { type: string }
+                score: { type: integer }
+                grade: { type: string, enum: [A, B, C, D] }
+                pd: { type: number }
+                factors: { type: array, items: { $ref: "#/components/schemas/ScoringFactor" } }
+                stop_factors: { type: array, items: { type: object, properties: { code: { type: string }, description: { type: string } } } }
+                recommendation:
+                  type: object
+                  properties:
+                    outcome: { type: string, enum: [APPROVE, COUNTER_OFFER, MANUAL_REVIEW, REJECT] }
+                    suggested: { type: string, enum: [APPROVE, COUNTER_OFFER, REJECT] }
+                    offer: { $ref: "#/components/schemas/Offer" }
+                    rate: { type: number }
+                    debt_to_revenue: { type: number }
+                    max_amount: { type: integer }
+                    reasons: { type: array, items: { type: string } }
+                    manual_reasons: { type: array, items: { type: string } }
+                    client_message: { type: string }
+    DecisionInput:
+      type: object
+      required: [action]
+      properties:
+        action: { type: string, enum: [APPROVE, COUNTER_OFFER, REQUEST_DOCS, REJECT] }
+        version: { type: integer, description: "Ожидаемая версия заявки (защита от одновременных решений)" }
+        amount: { type: integer }
+        term_months: { type: integer }
+        rate: { type: number }
+        client_message: { type: string }
+        comment: { type: string, description: "Внутренний комментарий; обязателен для REJECT" }
+        documents:
+          type: array
+          items:
+            type: object
+            properties:
+              doc_type: { type: string, enum: [BANK_STATEMENT, FINANCIAL_REPORT, TAX_DECLARATION, CONTRACTS, COLLATERAL_DOCS, OTHER] }
+              comment: { type: string }
