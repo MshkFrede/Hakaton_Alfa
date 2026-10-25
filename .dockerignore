@@ -1,0 +1,6 @@
+.git
+bin
+docs
+e2e
+*.md
+postman
