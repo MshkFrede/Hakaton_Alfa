@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Один образ сборки — два бинарника: api (конвейер + веб) и mocks (внешние источники).
 FROM golang:1.24-alpine AS build
 WORKDIR /src
